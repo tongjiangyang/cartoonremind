@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>宝箱开启动画</title>
+<style>
+  :root { --bg:#27296b; --btn:#ffcf5a; --btn-fg:#4a2a00; }
+  html, body { margin:0; height:100%; }
+  body {
+    background: radial-gradient(120% 80% at 50% 45%, #3a3d9a 0%, var(--bg) 70%);
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:20px;
+    font:16px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* 画面：12 张关键帧叠在一起，靠透明度切换 */
+  .viewport {
+    position:relative; width:min(86vw, 336px); aspect-ratio:280/387;
+    overflow:hidden; border-radius:20px; cursor:pointer;
+    box-shadow:0 20px 60px rgba(0,0,0,.35);
+  }
+  .stage { position:absolute; inset:0; transform-origin:50% 72%; }
+  .stage img {
+    position:absolute; inset:0; width:100%; height:100%;
+    opacity:0; user-select:none; -webkit-user-drag:none;
+  }
+  .stage img.on { opacity:1; }
+  .flash {
+    position:absolute; inset:0; pointer-events:none; opacity:0;
+    background:radial-gradient(circle at 50% 62%, #fff8d8 0%, rgba(255,210,120,.6) 35%, transparent 70%);
+    mix-blend-mode:screen;
+  }
+  .sparks { position:absolute; inset:0; pointer-events:none; }
+  .spark {
+    position:absolute; width:10px; height:10px; margin:-5px 0 0 -5px;
+    background:radial-gradient(circle, #fff 0%, #ffe38a 40%, transparent 70%);
+    clip-path:polygon(50% 0,62% 38%,100% 50%,62% 62%,50% 100%,38% 62%,0 50%,38% 38%);
+    animation:twinkle var(--d) ease-in-out forwards;
+  }
+  @keyframes twinkle {
+    0% { transform:scale(0) rotate(0deg); opacity:0; }
+    40% { transform:scale(1) rotate(45deg); opacity:1; }
+    100% { transform:translateY(var(--rise)) scale(0) rotate(90deg); opacity:0; }
+  }
+  .hint {
+    position:absolute; left:0; right:0; top:14%; text-align:center;
+    color:#fff; font-size:15px; letter-spacing:2px; text-shadow:0 2px 8px rgba(0,0,0,.5);
+    animation:blink 1.4s ease-in-out infinite; pointer-events:none;
+  }
+  @keyframes blink { 50% { opacity:.35; } }
+  button {
+    border:0; border-radius:999px; padding:10px 28px; font:inherit; font-weight:600;
+    background:var(--btn); color:var(--btn-fg); cursor:pointer;
+    box-shadow:0 4px 0 #c98a1c; transition:transform .1s, opacity .3s;
+  }
+  button:active { transform:translateY(2px); box-shadow:0 2px 0 #c98a1c; }
+  button[hidden] { display:inline-block; visibility:hidden; opacity:0; }
+  @media (prefers-reduced-motion: reduce) { .spark, .hint { animation:none; } }
+</style>
+</head>
+<body>
+
+<div class="viewport" id="viewport" aria-label="宝箱，点击开启" role="button">
+  <div class="stage" id="stage"></div>
+  <div class="flash" id="flash"></div>
+  <div class="sparks" id="sparks"></div>
+  <div class="hint" id="hint">点击开启宝箱</div>
+</div>
+<button id="replay" hidden>再开一次</button>
+
+<script>
+(() => {
+  const FRAMES = 12;
+  // 每一步：切到第几帧、交叉淡入用多久、停留多久（毫秒）
+  const TIMELINE = [
+    { f: 2,  fade: 60,  hold: 520, fx: 'shake' },
+    { f: 3,  fade: 100, hold: 260, fx: 'shakeSmall' },
+    { f: 4,  fade: 140, hold: 200 },
+    { f: 5,  fade: 90,  hold: 420, fx: 'burst' },
+    { f: 6,  fade: 220, hold: 220 },
+    { f: 7,  fade: 140, hold: 260 },
+    { f: 8,  fade: 140, hold: 360, fx: 'pop' },
+    { f: 9,  fade: 380, hold: 200 },
+    { f: 10, fade: 300, hold: 260 },
+    { f: 11, fade: 300, hold: 300, fx: 'push' },
+    { f: 12, fade: 420, hold: 0,   fx: 'final' },
+  ];
+
+  const stage = document.getElementById('stage');
+  const flash = document.getElementById('flash');
+  const sparks = document.getElementById('sparks');
+  const hint = document.getElementById('hint');
+  const replay = document.getElementById('replay');
+  const viewport = document.getElementById('viewport');
+
+  const imgs = [];
+  for (let i = 1; i <= FRAMES; i++) {
+    const img = new Image();
+    img.src = `frames/f${String(i).padStart(2, '0')}.webp`;
+    img.alt = '';
+    stage.appendChild(img);
+    imgs.push(img);
+  }
+  const ready = Promise.all(imgs.map(img => img.decode().catch(() => {})));
+
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  let current = 1, playing = false, idleTimer = null, idleAnim = null;
+
+  function show(f, fade) {
+    const next = imgs[f - 1], prev = imgs[current - 1];
+    next.style.zIndex = 2; prev.style.zIndex = 1;
+    next.animate([{ opacity: 0 }, { opacity: 1 }], { duration: fade, easing: 'ease-out', fill: 'forwards' })
+      .finished.then(() => {
+        imgs.forEach(im => { if (im !== next) { im.getAnimations().forEach(a => a.cancel()); im.classList.remove('on'); } });
+        next.classList.add('on');
+      });
+    current = f;
+  }
+
+  function spawnSparks(n, area) {
+    for (let i = 0; i < n; i++) {
+      const s = document.createElement('i');
+      s.className = 'spark';
+      const size = 6 + Math.random() * 12;
+      s.style.width = s.style.height = size + 'px';
+      s.style.left = (area.x + Math.random() * area.w) + '%';
+      s.style.top = (area.y + Math.random() * area.h) + '%';
+      s.style.setProperty('--d', (700 + Math.random() * 900) + 'ms');
+      s.style.setProperty('--rise', -(10 + Math.random() * 30) + 'px');
+      s.style.animationDelay = (Math.random() * 300) + 'ms';
+      sparks.appendChild(s);
+      s.addEventListener('animationend', () => s.remove());
+    }
+  }
+
+  const FX = {
+    shake() {
+      stage.animate([
+        { transform: 'rotate(0)' }, { transform: 'rotate(-2.2deg)' }, { transform: 'rotate(2.2deg)' },
+        { transform: 'rotate(-1.6deg)' }, { transform: 'rotate(1.4deg)' }, { transform: 'rotate(0)' },
+      ], { duration: 520, easing: 'ease-in-out' });
+    },
+    shakeSmall() {
+      stage.animate([
+        { transform: 'translateY(0)' }, { transform: 'translateY(-4px)' }, { transform: 'translateY(0)' },
+      ], { duration: 260, easing: 'ease-out' });
+    },
+    burst() {
+      flash.animate([{ opacity: 0 }, { opacity: 1, offset: .25 }, { opacity: 0 }], { duration: 650, easing: 'ease-out' });
+      stage.animate([
+        { transform: 'scale(1)' }, { transform: 'scale(1.06)', offset: .3 }, { transform: 'scale(1)' },
+      ], { duration: 520, easing: 'cubic-bezier(.2,1.6,.4,1)' });
+      spawnSparks(16, { x: 15, y: 25, w: 70, h: 45 });
+    },
+    pop() { spawnSparks(10, { x: 5, y: 15, w: 90, h: 40 }); },
+    push() {
+      stage.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.05)' }],
+        { duration: 650, easing: 'ease-in-out', fill: 'forwards' });
+    },
+    final() {
+      stage.getAnimations().forEach(a => a.cancel());
+      // 镜头从推近状态柔和地拉回，避免跳变
+      stage.animate([{ transform: 'scale(1.05)' }, { transform: 'scale(1)' }], { duration: 420, easing: 'ease-out' });
+      flash.animate([{ opacity: 0 }, { opacity: .55, offset: .3 }, { opacity: 0 }], { duration: 700 });
+      spawnSparks(18, { x: 10, y: 5, w: 80, h: 50 });
+    },
+  };
+
+  function startIdle() {
+    if (reduced) return;
+    // 结尾：轻微“呼吸” + 持续闪烁
+    idleAnim = stage.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.015)' }, { transform: 'scale(1)' }],
+      { duration: 2400, iterations: Infinity, easing: 'ease-in-out' });
+    idleTimer = setInterval(() => spawnSparks(3, { x: 8, y: 8, w: 84, h: 55 }), 450);
+  }
+  function stopIdle() {
+    clearInterval(idleTimer); idleTimer = null;
+    if (idleAnim) { idleAnim.cancel(); idleAnim = null; }
+  }
+
+  async function play() {
+    if (playing) return;
+    playing = true;
+    hint.hidden = true;
+    replay.hidden = true;
+    await ready;
+    for (const step of TIMELINE) {
+      show(step.f, reduced ? 0 : step.fade);
+      if (step.fx && !reduced) FX[step.fx]();
+      await sleep((reduced ? 0 : step.fade) + (reduced ? 120 : step.hold));
+    }
+    startIdle();
+    replay.hidden = false;
+    playing = false;
+  }
+
+  function reset() {
+    stopIdle();
+    sparks.textContent = '';
+    stage.getAnimations().forEach(a => a.cancel());
+    imgs.forEach(im => { im.getAnimations().forEach(a => a.cancel()); im.classList.remove('on'); });
+    imgs[0].classList.add('on');
+    current = 1;
+    hint.hidden = false;
+    replay.hidden = true;
+  }
+
+  // 未开启时：宝箱隔一会儿轻轻晃一下，提示可以点
+  setInterval(() => {
+    if (current === 1 && !playing && !reduced) {
+      stage.animate([
+        { transform: 'rotate(0)' }, { transform: 'rotate(-1.2deg)' }, { transform: 'rotate(1.2deg)' }, { transform: 'rotate(0)' },
+      ], { duration: 360 });
+    }
+  }, 2200);
+
+  viewport.addEventListener('click', () => { if (current === 1) play(); });
+  viewport.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && current === 1) play(); });
+  viewport.tabIndex = 0;
+  replay.addEventListener('click', () => { reset(); setTimeout(play, 250); });
+
+  reset();
+})();
+</script>
+</body>
+</html>
